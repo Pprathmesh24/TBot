@@ -1,0 +1,42 @@
+{
+  "lookback_period": 1000,
+  "min_pattern_separation": 3,
+  "enable_alerts": true,
+  "enable_visualization": true,
+  "save_reports": true,
+  "report_directory": "./reports",
+  "analysis_batch_size": 100,
+  "real_time_mode": false,
+  "risk_management": {
+    "max_consecutive_losses": 3,
+    "position_size_percent": 2.0,
+    "stop_loss_percent": 1.0,
+    "take_profit_percent": 2.0
+  },
+  "visualization": {
+    "chart_style": "dark_background",
+    "figure_size": [16, 10],
+    "colors": {
+      "bullish": "#00ff88",
+      "bearish": "#ff4444",
+      "neutral": "#888888",
+      "ch1": "#ff6b6b",
+      "cl1": "#4ecdc4",
+      "ch2": "#ff9999",
+      "cl2": "#74d4aa",
+      "bos_line": "#ffeb3b",
+      "choch": "#e91e63"
+    }
+  },
+  "alerts": {
+    "enable_sound": false,
+    "enable_console": true,
+    "enable_file_logging": true,
+    "log_file": "./reports/alerts.log"
+  },
+  "performance": {
+    "enable_statistics": true,
+    "track_execution_time": true,
+    "memory_optimization": true
+  }
+}

@@ -1,0 +1,28 @@
+# AI Trading Agent - Requirements
+# Core data analysis and computation
+pandas>=1.5.0
+numpy>=1.21.0
+
+# Visualization and plotting
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Additional utilities
+python-dateutil>=2.8.0
+
+# Optional: For enhanced performance (uncomment if needed)
+# numba>=0.56.0
+# scipy>=1.9.0
+
+# Optional: For web interface (uncomment if needed)
+# flask>=2.0.0
+# dash>=2.0.0
+
+# Optional: For database storage (uncomment if needed)
+# sqlalchemy>=1.4.0
+# sqlite3
+
+# Optional: For advanced machine learning features (uncomment if needed)
+# scikit-learn>=1.1.0
+# tensorflow>=2.9.0
+# torch>=1.12.0
