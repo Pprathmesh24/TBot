@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""
-AI Trading Agent - Main Application
-===================================
-
-Complete AI trading agent that implements sophisticated market structure analysis
-based on two-candle retracement patterns, BOS, and ChoCH concepts.
-
-Features:
-- Real-time market structure analysis
-- Pattern recognition and signal generation
-- Comprehensive visualization
-- Performance tracking and reporting
-- Alert system for trading opportunities
-
-Author: AI Trading Agent
-Version: 1.0
-"""
 
 import os
 import sys
