@@ -190,11 +190,23 @@ def train_final_model(df: pd.DataFrame, n_estimators: int = 300) -> XGBClassifie
     return model
 
 
-def save_model(model: XGBClassifier, path: Path) -> None:
+def save_model(
+    model: XGBClassifier,
+    path: Path,
+    feature_cols: List[str] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(model, f)
     print(f"Model saved → {path}")
+    # Save feature names alongside the model so predict.py can build
+    # the input vector in the correct order (XGBoost loses them when
+    # trained on numpy arrays instead of DataFrames)
+    if feature_cols:
+        import json
+        names_path = path.with_suffix(".features.json")
+        names_path.write_text(json.dumps(feature_cols))
+        print(f"Feature names saved → {names_path}")
 
 
 def load_model(path: Path) -> XGBClassifier:

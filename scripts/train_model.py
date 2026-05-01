@@ -73,8 +73,10 @@ def main() -> None:
     median_iter = int(np.median(result.best_iterations)) if result.best_iterations else 300
     print(f"\nTraining final model on all data  (n_estimators={median_iter}) …")
 
+    from tbot.ml.train import _feature_cols
+    feature_cols = _feature_cols(df)
     final_model = train_final_model(df, n_estimators=median_iter)
-    save_model(final_model, MODEL_PATH)
+    save_model(final_model, MODEL_PATH, feature_cols=feature_cols)
 
     # ------------------------------------------------------------------ #
     # 5. Save results JSON (for dashboard / reporting)

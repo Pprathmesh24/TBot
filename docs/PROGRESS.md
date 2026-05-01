@@ -143,3 +143,9 @@
 **Verify:** `.venv/bin/python scripts/calibrate_model.py` → Brier improvement 8.1% · `models/calibrator_v1.pkl` saved
 **Result:** Raw model overconfident (+0.05–0.17 gap) · calibrated gaps ≈ 0 · at threshold 0.60 → 68.7% expected win rate on 7% of signals
 **Sign-off:** ✅
+
+### Chunk 4 — Wire ML model into agent_v2
+**Files:** `src/tbot/ml/predict.py`, `src/tbot/core/agent_v2.py`
+**Verify:** Smoke test on 6mo slice → 9,120 hardcoded signals → 680 ML-filtered signals (conf range 0.629–0.917)
+**Result:** Hardcoded 0.65/0.70/0.75 replaced by calibrated XGBoost scores · 92.5% signal reduction at threshold 0.60
+**Sign-off:** ✅
