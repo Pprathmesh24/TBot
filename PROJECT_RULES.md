@@ -45,7 +45,11 @@ If verification fails, don't quietly patch. Show the error, state the hypothesis
 Master plan: `~/.claude/plans/spicy-gliding-hejlsberg.md`
 These rules govern *how* we travel toward it.
 
-## 11. Verification scripts, not inline commands
+## 11. Push to GitHub on every phase completion
+After all chunks in a phase are signed off, commit and push to GitHub before starting the next phase.
+The commit must include updated `docs/PROGRESS.md` with all chunk sign-offs for that phase.
+
+## 12. Verification scripts, not inline commands
 Never use `python -c "..."` for multi-line verification code.
 Always write a script file under `scripts/test_<feature>.py` and tell the user to run it.
 Reason: multi-line `-c` commands cause IndentationError when the shell wraps lines.
