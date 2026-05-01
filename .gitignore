@@ -1,0 +1,50 @@
+# Virtual environment
+tbot_venv/
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment / secrets
+.env
+*.env
+
+# Data files (large — fetch via scripts)
+data/raw/*.parquet
+data/raw/*.csv
+data/processed/
+data/features/
+data/tbot.sqlite
+
+# Models (large — store in model registry)
+models/*.pkl
+models/*.zip
+models/*.json
+models/*.npz
+
+# Generated outputs
+graphify-out/
+
+# Reports & outputs
+reports/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/

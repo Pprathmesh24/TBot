@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tbot"
+version = "0.1.0"
+description = "AI trading system for XAU/USD M5 — SMC + XGBoost + RL"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "pyarrow>=12.0.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "python-dateutil>=2.8.0",
+    "pydantic-settings>=2.0.0",
+    "structlog>=23.0.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.11.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+]
+ml = [
+    "xgboost>=2.0.0",
+    "scikit-learn>=1.3.0",
+    "vectorbt>=0.26.0",
+]
+broker = [
+    "oandapyV20>=0.6.3",
+    "python-dotenv>=1.0.0",
+]
+dashboard = [
+    "streamlit>=1.28.0",
+]
+rl = [
+    "stable-baselines3>=2.1.0",
+    "gymnasium>=0.29.0",
+]
+all = [
+    "tbot[test,ml,broker,dashboard,rl]",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tbot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
