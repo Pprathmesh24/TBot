@@ -27,6 +27,7 @@ from tbot.core.agent import AITradingAgent
 from tbot.data.loader import candles_to_dict_list
 from tbot.db.models import BacktestRun, EquitySnapshot, Signal, Trade
 from tbot.db.session import get_session, init_db
+from tbot.risk.manager import RiskManager, TradeRecord
 
 # Cost model: 2-pip spread + 0.5-pip slippage for XAU/USD M5
 # At ~$2000/oz: 1 pip = $0.01 → 2.5 pips ≈ $0.025 ≈ 0.00125% of price
@@ -47,6 +48,8 @@ def run_backtest(
     strategy_name: str = "rule_v1",
     init_cash: float = 10_000.0,
     agent=None,
+    risk_manager: RiskManager | None = None,
+    use_risk_manager: bool = True,
 ) -> int:
     """
     Full backtest pipeline.
@@ -84,11 +87,17 @@ def run_backtest(
     raw_signals: list[dict] = _agent.current_signals
     print(f"Agent produced {len(raw_signals)} raw signals")
 
-    # --- 2. Align signals to candle index ---
+    # --- 2. Risk filter (optional) ---
+    if use_risk_manager:
+        rm = risk_manager or RiskManager()
+        raw_signals = _apply_risk_filter(raw_signals, candles_df, rm, init_cash)
+        print(f"Signals after risk filter: {len(raw_signals)}")
+
+    # --- 3. Align signals to candle index ---
     arrays = adapt(raw_signals, candles_df, min_confidence=cfg.min_confidence)
     print(f"Signals after confidence filter (≥{cfg.min_confidence}): {arrays.n_signals}")
 
-    # --- 3. Convert absolute SL/TP to relative fractions for vectorbt ---
+    # --- 4. Convert absolute SL/TP to relative fractions for vectorbt ---
     close_vals = candles_df["close"].values
     sl_rel = np.where(
         arrays.entries & (arrays.sl_stop > 0),
@@ -101,13 +110,13 @@ def run_backtest(
         0.0,
     )
 
-    # --- 4. Build vectorbt close series (DatetimeIndex required) ---
+    # --- 5. Build vectorbt close series (DatetimeIndex required) ---
     close_series = pd.Series(
         close_vals,
         index=pd.DatetimeIndex(candles_df["timestamp"]),
     )
 
-    # --- 5. Run vectorbt portfolio ---
+    # --- 6. Run vectorbt portfolio ---
     portfolio = vbt.Portfolio.from_signals(
         close=close_series,
         entries=arrays.entries,
@@ -119,7 +128,7 @@ def run_backtest(
         freq="5min",
     )
 
-    # --- 6. Compute metrics ---
+    # --- 7. Compute metrics ---
     metrics = compute_metrics(portfolio, init_cash=init_cash)
     print(
         f"Backtest complete — {metrics['total_trades']} trades  "
@@ -128,7 +137,7 @@ def run_backtest(
         f"WinRate={metrics['win_rate']:.1%}"
     )
 
-    # --- 7. Write everything to DB ---
+    # --- 8. Write everything to DB ---
     run_id = _write_to_db(
         candles_df=candles_df,
         raw_signals=raw_signals,
@@ -271,3 +280,122 @@ def _to_dt(val) -> datetime | None:
         return ts.to_pydatetime()
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Risk filter
+# ---------------------------------------------------------------------------
+
+def _apply_risk_filter(
+    raw_signals: list[dict],
+    candles_df:  pd.DataFrame,
+    rm:          RiskManager,
+    init_cash:   float,
+    max_bars:    int = 48,
+) -> list[dict]:
+    """
+    Sequential risk filter — processes signals in chronological order.
+
+    For each signal:
+      1. Call rm.can_trade(equity, past_trades) — skip if blocked.
+      2. Scan forward in candles to estimate P&L (which barrier hits first).
+      3. Update running equity + trade_records for the next signal.
+
+    Returns the subset of signals that passed the gate, with 'units' set
+    by rm.position_size().
+    """
+    if not raw_signals:
+        return []
+
+    closes = candles_df["close"].values
+    highs  = candles_df["high"].values
+    lows   = candles_df["low"].values
+
+    # Timestamp → integer row index (UTC-normalised)
+    ts_to_idx: dict = {}
+    for i, ts in enumerate(candles_df["timestamp"]):
+        t = pd.Timestamp(ts)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        ts_to_idx[t] = i
+
+    sorted_sigs = sorted(raw_signals, key=lambda s: pd.Timestamp(s["timestamp"]))
+
+    equity:        float             = init_cash
+    trade_records: list[TradeRecord] = []
+    approved:      list[dict]        = []
+
+    for sig in sorted_sigs:
+        ts = pd.Timestamp(sig["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+
+        idx = ts_to_idx.get(ts)
+        if idx is None:
+            continue
+
+        ok, _ = rm.can_trade(equity=equity, recent_trades=trade_records, now=ts.to_pydatetime())
+        if not ok:
+            continue
+
+        entry = float(sig.get("price", closes[idx]))
+        sl    = float(sig.get("stop_loss",  0.0))
+        tp    = float(sig.get("take_profit", 0.0))
+        side  = sig.get("type", "BUY")
+
+        units = rm.position_size(equity=equity, entry=entry, stop=sl) if sl > 0 else rm.min_position
+
+        outcome = _estimate_outcome(closes, highs, lows, idx, entry, sl, tp, side, max_bars)
+        if outcome is not None:
+            pnl_per_unit, exit_idx = outcome
+            trade_pnl = pnl_per_unit * units
+            equity   += trade_pnl
+            exit_ts   = pd.Timestamp(candles_df["timestamp"].iloc[exit_idx])
+            if exit_ts.tzinfo is None:
+                exit_ts = exit_ts.tz_localize("UTC")
+            trade_records.append(TradeRecord(net_pnl=trade_pnl, exit_time=exit_ts.to_pydatetime()))
+
+        sig_copy         = dict(sig)
+        sig_copy["units"] = units
+        approved.append(sig_copy)
+
+    return approved
+
+
+def _estimate_outcome(
+    closes: np.ndarray,
+    highs:  np.ndarray,
+    lows:   np.ndarray,
+    entry_idx: int,
+    entry: float,
+    sl:    float,
+    tp:    float,
+    side:  str = "BUY",
+    max_bars: int = 48,
+) -> tuple[float, int] | None:
+    """
+    Scan forward from entry_idx to find which barrier (SL or TP) hits first.
+
+    Returns (pnl_per_unit, exit_bar_index) or None if SL/TP are invalid.
+    If neither barrier is hit within max_bars, uses the close of the last bar.
+    """
+    if sl <= 0 or tp <= 0:
+        return None
+
+    n = len(closes)
+    for i in range(entry_idx + 1, min(entry_idx + max_bars + 1, n)):
+        if side == "BUY":
+            if lows[i] <= sl:
+                return (sl - entry, i)   # SL hit — loss
+            if highs[i] >= tp:
+                return (tp - entry, i)   # TP hit — win
+        else:  # SELL
+            if highs[i] >= sl:
+                return (entry - sl, i)   # SL hit — loss (sl > entry for shorts)
+            if lows[i] <= tp:
+                return (entry - tp, i)   # TP hit — win (tp < entry for shorts)
+
+    # Timeout: neither barrier hit — close at last bar
+    exit_idx = min(entry_idx + max_bars, n - 1)
+    pnl = closes[exit_idx] - entry if side == "BUY" else entry - closes[exit_idx]
+    return (pnl, exit_idx)

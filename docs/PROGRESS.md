@@ -149,3 +149,22 @@
 **Verify:** Smoke test on 6mo slice → 9,120 hardcoded signals → 680 ML-filtered signals (conf range 0.629–0.917)
 **Result:** Hardcoded 0.65/0.70/0.75 replaced by calibrated XGBoost scores · 92.5% signal reduction at threshold 0.60
 **Sign-off:** ✅
+
+---
+
+## Phase 6 — Risk Management
+
+### Chunk 1 — RiskManager + tests
+**Files:** `src/tbot/risk/manager.py`, `tests/test_risk_manager.py`
+**Verify:** `.venv/bin/python -m pytest tests/test_risk_manager.py -v` → 25 passed
+**Sign-off:** ✅
+
+### Chunk 2 — RiskState (DB-backed wrapper)
+**Files:** `src/tbot/risk/state.py`, `tests/test_risk_state.py`
+**Verify:** `.venv/bin/python -m pytest tests/test_risk_state.py -v` → 8 passed
+**Sign-off:** ✅
+
+### Chunk 3 — Wire RiskManager into backtest engine
+**Files:** `src/tbot/backtest/engine.py`
+**Verify:** `.venv/bin/python -m pytest tests/test_risk_manager.py tests/test_risk_state.py -v` → 33 passed · `_apply_risk_filter` + `_estimate_outcome` added to engine
+**Sign-off:** ✅
