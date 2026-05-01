@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from tbot.broker.oanda_client import OandaClient
+from tbot.broker.oanda_client import MarketClosedError, OandaClient
 from tbot.db.models import Trade
 from tbot.risk.manager import RiskManager
 
@@ -81,6 +81,9 @@ class Executor:
                 take_profit = take_profit if take_profit > 0 else None,
                 comment     = f"tbot:{signal.get('source', 'smc')}",
             )
+        except MarketClosedError:
+            logger.info("Market closed — order skipped.")
+            return None
         except Exception:
             logger.exception("Order placement failed for signal %s", signal.get("timestamp"))
             return None

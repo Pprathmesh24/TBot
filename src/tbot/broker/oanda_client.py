@@ -15,6 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+
+class MarketClosedError(Exception):
+    """Raised when OANDA rejects an order because the market is halted."""
+
 import oandapyV20
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.orders as orders
@@ -143,9 +147,11 @@ class OandaClient:
         if fill is None:
             cancel = resp.get("orderCancelTransaction", {})
             reason = cancel.get("reason", "unknown")
+            if reason == "MARKET_HALTED":
+                raise MarketClosedError("Market is closed — order not filled.")
             raise RuntimeError(
                 f"Order not filled (reason: {reason}). "
-                "Market may be closed or liquidity unavailable."
+                "Liquidity unavailable or order rejected."
             )
         return str(fill.get("id", "unknown"))
 

@@ -11,12 +11,15 @@ account = client.get_account()
 print(f"NAV before order: ${account.nav:,.2f}")
 
 # 2. Place 1-unit BUY (no SL/TP so it stays open for inspection)
+from tbot.broker.oanda_client import MarketClosedError
+
 print("\nPlacing 1-unit BUY on XAU_USD ...")
-order_id = client.place_market_order(
-    instrument="XAU_USD",
-    units=1.0,
-)
-print(f"Order placed → OANDA id: {order_id}")
+try:
+    order_id = client.place_market_order(instrument="XAU_USD", units=1.0)
+    print(f"Order placed → OANDA id: {order_id}")
+except MarketClosedError:
+    print("Market closed — try again Sunday after 22:00 UTC.")
+    exit(0)
 
 # 3. List open trades to confirm
 import time; time.sleep(1)

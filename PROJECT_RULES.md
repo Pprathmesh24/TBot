@@ -45,17 +45,12 @@ If verification fails, don't quietly patch. Show the error, state the hypothesis
 Master plan: `~/.claude/plans/spicy-gliding-hejlsberg.md`
 These rules govern *how* we travel toward it.
 
----
-
-## Current phase: Phase 0 — Project Restructure
-**Goal:** modern `src/` layout so every later phase has a real home.
-
-**Phases at a glance:**
-```
-0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
-Restructure → Data → DB+Backtest → SMC → Features → XGB → Risk → OANDA → Monitor → Macro → RL → Polish
-```
+## 11. Verification scripts, not inline commands
+Never use `python -c "..."` for multi-line verification code.
+Always write a script file under `scripts/test_<feature>.py` and tell the user to run it.
+Reason: multi-line `-c` commands cause IndentationError when the shell wraps lines.
+Single truly-one-liner commands are the only exception.
 
 ---
 
-*Last updated: Phase 0 start*
+*Progress and phase status are tracked in `docs/PROGRESS.md`.*

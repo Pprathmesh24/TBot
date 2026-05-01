@@ -168,3 +168,30 @@
 **Files:** `src/tbot/backtest/engine.py`
 **Verify:** `.venv/bin/python -m pytest tests/test_risk_manager.py tests/test_risk_state.py -v` → 33 passed · `_apply_risk_filter` + `_estimate_outcome` added to engine
 **Sign-off:** ✅
+
+---
+
+## Phase 7 — OANDA Paper Broker Integration
+
+### Chunk 1 — OandaClient
+**Files:** `src/tbot/broker/oanda_client.py`, `scripts/check_account.py`
+**Verify:** `.venv/bin/python scripts/check_account.py` → prints account ID + $100,000 balance
+**Result:** Auth works · account summary returns live data · `place_market_order` raises RuntimeError if order not filled
+**Sign-off:** ✅
+
+### Chunk 2 — PriceStream (tick → M5 candle aggregator)
+**Files:** `src/tbot/broker/stream.py`, `scripts/test_stream.py`
+**Verify:** `.venv/bin/python scripts/test_stream.py` → correct bar boundary + candle dict
+**Sign-off:** ✅
+
+### Chunk 3 — Executor (signal → paper order + DB write)
+**Files:** `src/tbot/broker/executor.py`, `scripts/test_executor.py`
+**Verify:** `.venv/bin/python scripts/test_executor.py` → import OK · position size 20 units
+**Note:** Live order test (`scripts/test_live_order.py`) deferred to Sunday 22:00 UTC when gold market reopens
+**Sign-off:** ✅
+
+### Chunk 4 — LiveRunner (full integration loop)
+**Files:** `src/tbot/live/runner.py`, `scripts/run_paper_live.py`, `scripts/test_runner.py`
+**Verify:** `.venv/bin/python scripts/test_runner.py` → LiveRunner import OK · _ts_matches OK
+**Result:** Stream → agent → risk gate → executor wired end-to-end · MarketClosedError added for clean weekend handling
+**Sign-off:** ✅
