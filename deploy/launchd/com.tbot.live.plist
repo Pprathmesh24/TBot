@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- Unique service identifier — must match the filename -->
+    <key>Label</key>
+    <string>com.tbot.live</string>
+
+    <!-- Python interpreter + entry script (absolute paths required) -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/.venv/bin/python</string>
+        <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/scripts/run_paper_live.py</string>
+    </array>
+
+    <!-- Working directory so relative paths (.env, data/) resolve correctly -->
+    <key>WorkingDirectory</key>
+    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot</string>
+
+    <!-- Restart automatically if the process exits for any reason -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Do NOT start automatically on login — load manually when ready -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Log files — tail these to monitor the live bot -->
+    <key>StandardOutPath</key>
+    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/tbot-live.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/tbot-live-error.log</string>
+
+    <!-- Throttle restarts — wait 10s before restarting after a crash -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+</dict>
+</plist>

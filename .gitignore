@@ -21,6 +21,8 @@ data/raw/*.csv
 data/processed/
 data/features/
 data/tbot.sqlite
+data/tbot.sqlite-shm
+data/tbot.sqlite-wal
 
 # Models (large — store in model registry)
 models/*.pkl

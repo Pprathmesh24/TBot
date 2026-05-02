@@ -195,3 +195,31 @@
 **Verify:** `.venv/bin/python scripts/test_runner.py` → LiveRunner import OK · _ts_matches OK
 **Result:** Stream → agent → risk gate → executor wired end-to-end · MarketClosedError added for clean weekend handling
 **Sign-off:** ✅
+
+---
+
+## Phase 8 — Monitoring + Multi-Month Paper Run
+
+### Chunk 1 — Structured logger
+**Files:** `src/tbot/monitoring/logger.py`
+**Verify:** `.venv/bin/python scripts/test_logger.py` → 3 JSON lines · all have timestamp/level/logger/event
+**Sign-off:** ✅
+
+### Chunk 2 — Slack alerts
+**Files:** `src/tbot/monitoring/alerts.py`, `src/tbot/config.py` (slack_webhook_url field)
+**Verify:** `.venv/bin/python scripts/test_alerts.py` → 5 alerts sent · received in Slack
+**Sign-off:** ✅
+
+### Chunk 3 — Streamlit dashboard
+**Files:** `src/tbot/monitoring/dashboard.py`, `scripts/run_dashboard.py`
+**Verify:** `streamlit run src/tbot/monitoring/dashboard.py` → page loads with metrics + tables
+**Sign-off:** ✅
+
+### Chunk 4 — launchd service
+**Files:** `deploy/launchd/com.tbot.live.plist`, `logs/` directory
+**Verify:** `plutil -lint deploy/launchd/com.tbot.live.plist` → OK
+**Sign-off:** ✅
+
+### Cleanup — Legacy file removal
+**Deleted:** `Trading_agent.py`, `market_structure_analyzer.py`, `visualizer.py`, `test_trading_agent.py`, `config.json`, `requirements.txt`, `demo_trading_agent.py`, `example_usage.py` (root-level), `graphify-out/`
+**Sign-off:** ✅
