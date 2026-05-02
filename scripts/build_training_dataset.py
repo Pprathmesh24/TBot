@@ -27,6 +27,7 @@ from tbot.core.smc.structure_v2 import EnrichedMarketStructureAnalyzer
 from tbot.data.loader import load_candles
 from tbot.features.builder import build_features_fast, precompute_indicators
 from tbot.features.labeler import label_all
+from tbot.features.macro_features import get_macro_features_batch
 
 
 def build_dataset(timeout_candles: int = 48) -> pd.DataFrame:
@@ -72,7 +73,7 @@ def build_dataset(timeout_candles: int = 48) -> pd.DataFrame:
 
     for sig in labeled:
         idx   = sig["signal_idx"]
-        feats = build_features_fast(df, pc, idx, sig, fvgs, obs, sweeps)
+        feats = build_features_fast(df, pc, idx, sig, fvgs, obs, sweeps, use_macro=False)
 
         if not feats:        # idx < 50 — not enough history
             skipped_no_history += 1
@@ -82,6 +83,17 @@ def build_dataset(timeout_candles: int = 48) -> pd.DataFrame:
         rows.append(row)
 
     print(f"  {len(rows):,} feature rows built  (skipped {skipped_no_history} for insufficient history)")
+
+    # ------------------------------------------------------------------ #
+    # 4b. Join macro features (vectorized — one pass via merge_asof)
+    # ------------------------------------------------------------------ #
+    print("Joining macro features (vectorized) …")
+    dataset_tmp  = pd.DataFrame(rows)
+    macro_df     = get_macro_features_batch(dataset_tmp["timestamp"])
+    macro_df.index = dataset_tmp.index
+    dataset_tmp  = pd.concat([dataset_tmp, macro_df], axis=1)
+    rows = dataset_tmp.to_dict("records")
+    print(f"  Macro features joined ({len(macro_df.columns)} cols)")
 
     # ------------------------------------------------------------------ #
     # 5. Assemble DataFrame and save

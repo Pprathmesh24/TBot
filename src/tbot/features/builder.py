@@ -309,6 +309,7 @@ def build_features_fast(
     fvgs: List[FVG],
     obs: List[OrderBlock],
     sweeps: List[LiquiditySweep],
+    use_macro: bool = True,
 ) -> dict:
     """
     Same feature set as build_features() but reads from pre-computed series.
@@ -413,5 +414,13 @@ def build_features_fast(
     feats["signal_direction"]  = 1.0 if signal.get("type") == "BUY" else -1.0
     feats["signal_confidence"] = float(signal.get("confidence", 0.0))
     feats["signal_trigger"]    = float(_TRIGGER_ENCODE.get(signal.get("reason", ""), -1))
+
+    # --- Macro (DXY, VIX, 10Y TIPS yield, COT) ---
+    if use_macro:
+        try:
+            from tbot.features.macro_features import get_macro_features
+            feats.update(get_macro_features(ts))
+        except Exception:
+            pass  # macro parquets not yet fetched — skip gracefully
 
     return {k: float(v) for k, v in feats.items()}

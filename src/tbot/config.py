@@ -35,6 +35,7 @@ class TBotConfig(BaseSettings):
     db_path: Path = Path("./data/tbot.sqlite")
 
     slack_webhook_url: str = ""   # set SLACK_WEBHOOK_URL in .env
+    fred_api_key:      str = ""   # set FRED_API_KEY in .env
 
     risk: RiskConfig = Field(default_factory=RiskConfig)
     oanda: OandaConfig = Field(default_factory=OandaConfig)

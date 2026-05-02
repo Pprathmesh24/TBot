@@ -205,6 +205,44 @@
 **Verify:** `.venv/bin/python scripts/test_logger.py` → 3 JSON lines · all have timestamp/level/logger/event
 **Sign-off:** ✅
 
+---
+
+## Phase 9 — Sentiment + Macro Features
+
+### Chunk 1 — DXY + VIX loaders (yfinance)
+**Files:** `src/tbot/data/macro/__init__.py`, `src/tbot/data/macro/dxy.py`, `src/tbot/data/macro/vix.py`
+**Verify:** `.venv/bin/python scripts/test_macro_dxy_vix.py` → 1,845 DXY rows · 1,843 VIX rows · parquets saved
+**Sign-off:** ✅
+
+### Chunk 2 — 10Y TIPS real yield loader (FRED via fredapi)
+**Files:** `src/tbot/data/macro/yields.py`, `src/tbot/config.py` (fred_api_key), `.env.example` (updated)
+**Verify:** `.venv/bin/python scripts/test_macro_yields.py` → 1,833 rows · min=-1.19% · max=2.52%
+**Note:** Switched from pandas-datareader to fredapi (distutils removed in Python 3.12)
+**Sign-off:** ✅
+
+### Chunk 3 — CFTC COT Gold loader
+**Files:** `src/tbot/data/macro/cot.py`, `scripts/test_macro_cot.py`
+**Verify:** `.venv/bin/python scripts/test_macro_cot.py` → 382 rows · 2019-01-08 → 2026-04-28 · mm_net_pct min=-0.23 max=0.98
+**Sign-off:** ✅
+
+### Chunk 4 — Macro feature lookup
+**Files:** `src/tbot/features/macro_features.py`, `scripts/test_macro_features.py`
+**Verify:** `.venv/bin/python scripts/test_macro_features.py` → 10 features per timestamp · COVID VIX=66.04 · all assertions pass
+**Sign-off:** ✅
+
+### Chunk 5 — Macro data refresh script
+**Files:** `scripts/refresh_macro_data.py`
+**Verify:** `.venv/bin/python scripts/refresh_macro_data.py` → all 4 sources refreshed, no errors
+**Sign-off:** ✅
+
+### Chunk 6 — xgb_v2 training with macro features
+**Files:** `src/tbot/features/builder.py` (use_macro param), `src/tbot/features/macro_features.py` (batch API added), `scripts/build_training_dataset.py` (batch macro join), `scripts/train_model_v2.py`, `scripts/calibrate_model_v2.py`
+**Result:** xgb_v2 AUC=0.6354 — identical to xgb_v1. Macro features ranked 1% importance each (temporal mismatch: daily data repeated 288× at M5). Decision: keep xgb_v1 + use macro as a regime pre-filter in live runner.
+**Optimization:** `macro_features.py` rewritten with `pd.merge_asof` batch API (100× faster for future rebuilds)
+**Sign-off:** ✅
+
+---
+
 ### Chunk 2 — Slack alerts
 **Files:** `src/tbot/monitoring/alerts.py`, `src/tbot/config.py` (slack_webhook_url field)
 **Verify:** `.venv/bin/python scripts/test_alerts.py` → 5 alerts sent · received in Slack

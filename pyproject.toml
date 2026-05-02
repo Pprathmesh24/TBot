@@ -37,12 +37,16 @@ broker = [
 dashboard = [
     "streamlit>=1.28.0",
 ]
+macro = [
+    "yfinance>=0.2.40",
+    "fredapi>=0.5.0",
+]
 rl = [
     "stable-baselines3>=2.1.0",
     "gymnasium>=0.29.0",
 ]
 all = [
-    "tbot[test,ml,broker,dashboard,rl]",
+    "tbot[test,ml,broker,dashboard,macro,rl]",
 ]
 
 [tool.hatch.build.targets.wheel]
