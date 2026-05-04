@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -115,6 +116,7 @@ class PriceStream:
     def start(self, on_candle: Callable[[dict], None]) -> None:
         """
         Connect to OANDA pricing stream and block until stop() is called.
+        Automatically reconnects on disconnect with exponential backoff.
 
         on_candle is called in this thread once per completed bar.
         Wrap in a background thread if you need non-blocking behaviour.
@@ -126,59 +128,70 @@ class PriceStream:
         self._stop_event.clear()
         logger.info("Starting price stream for %s …", self._instrument)
 
-        req = pricing.PricingStream(
-            accountID=self._client.account_id,
-            params={"instruments": self._instrument},
-        )
+        retry_delay = 5  # seconds, doubles on each failure up to 60s
 
-        try:
-            for msg in self._client._client.request(req):
+        while not self._stop_event.is_set():
+            req = pricing.PricingStream(
+                accountID=self._client.account_id,
+                params={"instruments": self._instrument},
+            )
+
+            try:
+                for msg in self._client._client.request(req):
+                    if self._stop_event.is_set():
+                        break
+
+                    msg_type = msg.get("type")
+
+                    if msg_type == "HEARTBEAT":
+                        continue
+
+                    if msg_type != "PRICE":
+                        continue
+
+                    bid = msg.get("bids", [{}])[0].get("price", "0")
+                    ask = msg.get("asks", [{}])[0].get("price", "0")
+                    mid = _mid(bid, ask)
+
+                    raw_time = msg.get("time", "")
+                    try:
+                        tick_time = datetime.fromisoformat(
+                            raw_time.replace("Z", "+00:00")
+                        ).replace(tzinfo=timezone.utc)
+                    except (ValueError, AttributeError):
+                        tick_time = datetime.now(timezone.utc)
+
+                    bar_ts = _bar_start(tick_time, self._granularity)
+
+                    if self._builder is None:
+                        self._builder = CandleBuilder(bar_ts, mid)
+                    elif bar_ts > self._builder.bar_start:
+                        completed = self._builder.to_dict()
+                        logger.debug("Candle closed: %s  C=%.3f", bar_ts, completed["close"])
+                        try:
+                            on_candle(completed)
+                        except Exception:
+                            logger.exception("on_candle callback raised")
+                        self._builder = CandleBuilder(bar_ts, mid)
+                    else:
+                        self._builder.update(mid)
+
+                # Clean exit via stop()
                 if self._stop_event.is_set():
                     break
 
-                msg_type = msg.get("type")
+                # Stream ended without stop() — treat as disconnect
+                logger.warning("Stream ended unexpectedly — reconnecting in %ds …", retry_delay)
 
-                if msg_type == "HEARTBEAT":
-                    continue
+            except Exception:
+                if self._stop_event.is_set():
+                    break
+                logger.exception("Price stream disconnected — reconnecting in %ds …", retry_delay)
 
-                if msg_type != "PRICE":
-                    continue
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
 
-                bid = msg.get("bids", [{}])[0].get("price", "0")
-                ask = msg.get("asks", [{}])[0].get("price", "0")
-                mid = _mid(bid, ask)
-
-                raw_time = msg.get("time", "")
-                try:
-                    tick_time = datetime.fromisoformat(
-                        raw_time.replace("Z", "+00:00")
-                    ).replace(tzinfo=timezone.utc)
-                except (ValueError, AttributeError):
-                    tick_time = datetime.now(timezone.utc)
-
-                bar_ts = _bar_start(tick_time, self._granularity)
-
-                if self._builder is None:
-                    # First tick — start the first bar
-                    self._builder = CandleBuilder(bar_ts, mid)
-                elif bar_ts > self._builder.bar_start:
-                    # New bar boundary crossed → emit completed candle
-                    completed = self._builder.to_dict()
-                    logger.debug("Candle closed: %s  C=%.3f", bar_ts, completed["close"])
-                    try:
-                        on_candle(completed)
-                    except Exception:
-                        logger.exception("on_candle callback raised")
-                    # Start new bar with this tick as the open
-                    self._builder = CandleBuilder(bar_ts, mid)
-                else:
-                    self._builder.update(mid)
-
-        except Exception:
-            if not self._stop_event.is_set():
-                logger.exception("Price stream disconnected unexpectedly")
-        finally:
-            logger.info("Price stream stopped.")
+        logger.info("Price stream stopped.")
 
     def stop(self) -> None:
         """Signal the stream loop to exit after the next message."""
