@@ -48,7 +48,7 @@ _file = RotatingFileHandler(
     backupCount=5,               # keep 5 rotated files (~50 MB total)
     encoding="utf-8",
 )
-_file.setLevel(logging.INFO)     # less chatty on disk than console
+_file.setLevel(logging.DEBUG)    # DEBUG so candle closes appear in file (needed by watchdog)
 _file.setFormatter(_FMT)
 _root.addHandler(_file)
 
