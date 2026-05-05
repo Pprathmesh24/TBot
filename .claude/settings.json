@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if ps aux | grep -q \"[r]un_paper_live\\|[r]un_supervisor\"; then LAST=$(grep \"Candle closed\" /Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/paper_live.log 2>/dev/null | tail -1); if [ -n \"$LAST\" ]; then TS=$(echo \"$LAST\" | grep -oP \"\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\"); NOW=$(date -u +\"%s\"); LAST_SEC=$(date -u -j -f \"%Y-%m-%d %H:%M:%S\" \"$TS\" +\"%s\" 2>/dev/null); if [ -n \"$LAST_SEC\" ]; then GAP=$((NOW - LAST_SEC)); if [ $GAP -gt 360 ]; then echo \"[TBOT-HOOK] ⚠ WARNING: last candle was ${GAP}s ago (>${360}s threshold) — stream may be stalled\"; fi; fi; fi; fi'"
+          }
+        ]
+      }
+    ]
+  }
+}
