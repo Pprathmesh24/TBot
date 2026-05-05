@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from tbot.broker.executor import Executor
-from tbot.broker.oanda_client import OandaClient
+from tbot.broker.oanda_client import MarketClosedError, OandaClient
 from tbot.broker.stream import PriceStream
 from tbot.config import cfg
 from tbot.core.agent_v2 import AITradingAgentV2
@@ -100,11 +100,16 @@ class LiveRunner:
         signal.signal(signal.SIGTERM, lambda *_: self.stop())
 
         logger.info("LiveRunner starting — instrument=%s", self._instrument)
-        account = self._client.get_account()
-        logger.info(
-            "Account %s  NAV=$%.2f  Balance=$%.2f",
-            account.account_id, account.nav, account.balance,
-        )
+        try:
+            account = self._client.get_account()
+            logger.info(
+                "Account %s  NAV=$%.2f  Balance=$%.2f",
+                account.account_id, account.nav, account.balance,
+            )
+        except Exception:
+            # Don't abort startup on a transient REST blip — the loop will retry
+            # equity fetches per signal anyway.
+            logger.exception("Initial account fetch failed — continuing anyway")
 
         # Start price stream in background thread
         stream_thread = self._stream.start_background(self._on_candle)
@@ -115,9 +120,38 @@ class LiveRunner:
             while not self._stop_event.is_set():
                 time.sleep(1)
         finally:
+            self._shutdown(stream_thread)
+
+    def _shutdown(self, stream_thread: threading.Thread | None) -> None:
+        """Best-effort graceful shutdown — never raises."""
+        try:
             self._stream.stop()
-            stream_thread.join(timeout=5)
-            logger.info("LiveRunner stopped.")
+        except Exception:
+            logger.exception("Error stopping price stream")
+
+        if stream_thread is not None:
+            try:
+                stream_thread.join(timeout=5)
+            except Exception:
+                logger.exception("Error joining stream thread")
+
+        # Log any open OANDA positions so the operator can reconcile manually.
+        # We deliberately do NOT auto-close positions here: stops/take-profits
+        # remain attached server-side, and unilaterally flattening on Ctrl+C
+        # could realise unintended losses.
+        try:
+            open_positions = self._client.get_open_positions()
+            if open_positions:
+                logger.warning(
+                    "Shutdown: %d open OANDA position(s) remain (SL/TP still active server-side)",
+                    len(open_positions),
+                )
+                for p in open_positions:
+                    logger.warning("  open position: %s", p.get("instrument", "?"))
+        except Exception:
+            logger.exception("Could not fetch open positions during shutdown")
+
+        logger.info("LiveRunner stopped.")
 
     def stop(self) -> None:
         """Signal the runner to shut down cleanly."""
@@ -129,71 +163,100 @@ class LiveRunner:
     # ------------------------------------------------------------------
 
     def _on_candle(self, candle: dict) -> None:
-        """Called by PriceStream once per completed M5 bar."""
-        self._candles.append(candle)
+        """Called by PriceStream once per completed M5 bar.
 
-        n = len(self._candles)
-        logger.debug(
-            "Candle received [%d/%d]  ts=%s  C=%.3f",
-            n, _MIN_HISTORY, candle["timestamp"], candle["close"],
-        )
+        This is the top-level callback running in the stream thread.  ANY
+        exception here would bubble up into PriceStream's loop (which already
+        catches it), but to keep state consistent we also handle it locally so
+        a single bad candle / bad model inference does not lose subsequent
+        candles' state.
+        """
+        try:
+            self._candles.append(candle)
 
-        if n < _MIN_HISTORY:
-            return  # not enough history for indicators yet
+            n = len(self._candles)
+            logger.debug(
+                "Candle received [%d/%d]  ts=%s  C=%.3f",
+                n, _MIN_HISTORY, candle["timestamp"], candle["close"],
+            )
 
-        df = pd.DataFrame(list(self._candles))
+            if n < _MIN_HISTORY:
+                return  # not enough history for indicators yet
 
-        # Ensure timestamp column is UTC-aware
-        if not pd.api.types.is_datetime64tz_dtype(df["timestamp"]):
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+            df = pd.DataFrame(list(self._candles))
 
-        # Run agent on full window
-        self._agent.run_on_df(df)
+            # Ensure timestamp column is UTC-aware
+            if not pd.api.types.is_datetime64tz_dtype(df["timestamp"]):
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
-        # Filter to signals at the most recent candle only
-        latest_ts = candle["timestamp"]
-        if not isinstance(latest_ts, datetime):
-            latest_ts = pd.Timestamp(latest_ts).to_pydatetime()
-        if latest_ts.tzinfo is None:
-            latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+            # Run agent on full window — wrap separately so a model/SMC
+            # inference bug on one candle doesn't kill the loop.
+            try:
+                self._agent.run_on_df(df)
+            except Exception:
+                logger.exception("Agent inference failed on candle %s — skipping", candle.get("timestamp"))
+                return
 
-        new_signals = [
-            s for s in self._agent.current_signals
-            if _ts_matches(s.get("timestamp"), latest_ts)
-        ]
+            # Filter to signals at the most recent candle only
+            latest_ts = candle["timestamp"]
+            if not isinstance(latest_ts, datetime):
+                latest_ts = pd.Timestamp(latest_ts).to_pydatetime()
+            if latest_ts.tzinfo is None:
+                latest_ts = latest_ts.replace(tzinfo=timezone.utc)
 
-        if not new_signals:
-            return
+            new_signals = [
+                s for s in self._agent.current_signals
+                if _ts_matches(s.get("timestamp"), latest_ts)
+            ]
 
-        logger.info("%d signal(s) at %s", len(new_signals), latest_ts)
-        self._process_signals(new_signals)
+            if not new_signals:
+                return
+
+            logger.info("%d signal(s) at %s", len(new_signals), latest_ts)
+            self._process_signals(new_signals)
+        except Exception:
+            logger.exception("Unhandled error in _on_candle — continuing")
 
     def _process_signals(self, signals: list[dict]) -> None:
         """Gate each signal through risk and execute if approved."""
         try:
             equity = self._client.get_equity()
+        except MarketClosedError:
+            logger.info("Market closed — skipping signals")
+            return
         except Exception:
             logger.exception("Could not fetch equity — skipping signals")
             return
 
-        with get_session() as session:
-            risk  = RiskState(session, instrument=self._instrument)
-            rm    = RiskManager()
-            executor = Executor(self._client, session, rm=rm, instrument=self._instrument)
+        try:
+            with get_session() as session:
+                risk  = RiskState(session, instrument=self._instrument)
+                rm    = RiskManager()
+                executor = Executor(self._client, session, rm=rm, instrument=self._instrument)
 
-            for sig in signals:
-                ok, reason = risk.can_trade(equity=equity)
-                if not ok:
-                    logger.info("Signal blocked: %s", reason)
-                    continue
+                for sig in signals:
+                    try:
+                        ok, reason = risk.can_trade(equity=equity)
+                        if not ok:
+                            logger.info("Signal blocked: %s", reason)
+                            continue
 
-                logger.info(
-                    "Executing signal  side=%s  entry=%.3f  conf=%.3f",
-                    sig.get("type"), sig.get("price"), sig.get("confidence", 0),
-                )
-                trade_id = executor.execute(sig, equity=equity)
-                if trade_id:
-                    logger.info("Trade DB id=%d", trade_id)
+                        logger.info(
+                            "Executing signal  side=%s  entry=%.3f  conf=%.3f",
+                            sig.get("type"), sig.get("price"), sig.get("confidence", 0),
+                        )
+                        trade_id = executor.execute(sig, equity=equity)
+                        if trade_id:
+                            logger.info("Trade DB id=%d", trade_id)
+                    except MarketClosedError:
+                        logger.info("Market closed — remaining signals skipped")
+                        return
+                    except Exception:
+                        logger.exception("Failed to process signal %s — continuing", sig.get("timestamp"))
+                        continue
+        except Exception:
+            # DB session creation / commit failure — must not crash the runner.
+            logger.exception("DB session error in _process_signals — signals dropped")
 
 
 # ---------------------------------------------------------------------------

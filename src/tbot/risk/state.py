@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import List, Tuple
 
@@ -24,6 +25,8 @@ from sqlalchemy.orm import Session
 
 from tbot.db.models import Trade
 from tbot.risk.manager import RiskManager, TradeRecord
+
+logger = logging.getLogger(__name__)
 
 
 class RiskState:
@@ -60,8 +63,17 @@ class RiskState:
         equity: float,
         now:    datetime | None = None,
     ) -> Tuple[bool, str]:
-        """Check whether a new trade is allowed given the current DB state."""
-        trades = self._load_trades()
+        """Check whether a new trade is allowed given the current DB state.
+
+        If the trade history cannot be loaded (e.g. DB locked or corrupted),
+        we fail closed: block trading rather than risk an unbounded loss
+        streak going undetected.
+        """
+        try:
+            trades = self._load_trades()
+        except Exception:
+            logger.exception("RiskState: failed to load trade history — blocking trade")
+            return False, "risk state DB read failed — trade blocked"
         return self._rm.can_trade(equity=equity, recent_trades=trades, now=now)
 
     def position_size(

@@ -90,17 +90,36 @@ class Executor:
 
         logger.info("Order placed → OANDA id=%s", oanda_id)
 
-        # Write Trade row — exit fields filled in later when trade closes
-        trade = Trade(
-            instrument      = self._instrument,
-            side            = "BUY" if units > 0 else "SELL",
-            units           = abs(units),
-            entry_time      = datetime.now(timezone.utc),
-            entry_price     = entry,
-            oanda_order_id  = oanda_id,
-        )
-        self._session.add(trade)
-        self._session.flush()
+        # Write Trade row — exit fields filled in later when trade closes.
+        # If the DB write fails (locked / corrupted), the order is already on
+        # OANDA — we MUST log loudly so the trade is reconciled manually, but
+        # we should NOT crash the live runner.
+        try:
+            trade = Trade(
+                instrument      = self._instrument,
+                side            = "BUY" if units > 0 else "SELL",
+                units           = abs(units),
+                entry_time      = datetime.now(timezone.utc),
+                entry_price     = entry,
+                oanda_order_id  = oanda_id,
+            )
+            self._session.add(trade)
+            self._session.flush()
+        except Exception:
+            logger.exception(
+                "DB write FAILED after OANDA fill — orphan trade! "
+                "OANDA id=%s side=%s units=%.2f entry=%.3f",
+                oanda_id, side, units, entry,
+            )
+            try:
+                from tbot.monitoring.alerts import alert_critical_error
+                alert_critical_error(
+                    f"DB write failed after OANDA fill (orphan trade): "
+                    f"oanda_id={oanda_id} side={side} units={units} entry={entry}"
+                )
+            except Exception:
+                logger.debug("alert_critical_error failed", exc_info=True)
+            return None
 
         logger.info("Trade written to DB  id=%d", trade.id)
         return trade.id

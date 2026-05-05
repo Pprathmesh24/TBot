@@ -129,6 +129,7 @@ class PriceStream:
         logger.info("Starting price stream for %s …", self._instrument)
 
         retry_delay = 5  # seconds, doubles on each failure up to 60s
+        attempt     = 0
 
         while not self._stop_event.is_set():
             req = pricing.PricingStream(
@@ -136,10 +137,25 @@ class PriceStream:
                 params={"instruments": self._instrument},
             )
 
+            received_any = False  # if we got at least one msg, reset backoff afterwards
+
             try:
                 for msg in self._client._client.request(req):
                     if self._stop_event.is_set():
                         break
+
+                    # Reset retry delay once we know the connection works.
+                    if not received_any:
+                        received_any = True
+                        if attempt > 0:
+                            logger.info("Price stream reconnected (attempt %d)", attempt)
+                            try:
+                                from tbot.monitoring.alerts import alert_stream_reconnect
+                                alert_stream_reconnect(attempt)
+                            except Exception:
+                                logger.debug("alert_stream_reconnect failed", exc_info=True)
+                        retry_delay = 5
+                        attempt = 0
 
                     msg_type = msg.get("type")
 
@@ -188,7 +204,10 @@ class PriceStream:
                     break
                 logger.exception("Price stream disconnected — reconnecting in %ds …", retry_delay)
 
-            time.sleep(retry_delay)
+            # Wait before retrying, but stay responsive to stop()
+            attempt += 1
+            if self._stop_event.wait(timeout=retry_delay):
+                break
             retry_delay = min(retry_delay * 2, 60)
 
         logger.info("Price stream stopped.")
