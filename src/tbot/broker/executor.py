@@ -46,7 +46,7 @@ class Executor:
         self._rm         = rm or RiskManager()
         self._instrument = instrument
 
-    def execute(self, signal: dict, equity: float) -> int | None:
+    def execute(self, signal: dict, equity: float, signal_id: int | None = None) -> int | None:
         """
         Place a market order for the given signal and write a Trade to DB.
 
@@ -97,6 +97,7 @@ class Executor:
         try:
             trade = Trade(
                 instrument      = self._instrument,
+                signal_id       = signal_id,
                 side            = "BUY" if units > 0 else "SELL",
                 units           = abs(units),
                 entry_time      = datetime.now(timezone.utc),
@@ -157,10 +158,57 @@ class Executor:
             if trade.oanda_order_id in oanda_open:
                 continue  # still open
 
-            # Trade closed on OANDA side — mark exit in DB
-            trade.exit_time   = datetime.now(timezone.utc)
-            trade.exit_reason = "CLOSED"
+            # Fetch real close price + time from OANDA trade details
+            try:
+                details = self._client.get_trade_details(trade.oanda_order_id)
+                close_price = details.get("averageClosePrice")
+                close_time  = details.get("closeTime")
+                realized_pl = details.get("realizedPL")
+
+                trade.exit_price  = float(close_price) if close_price else None
+                trade.exit_time   = _parse_oanda_time(close_time) or datetime.now(timezone.utc)
+                trade.exit_reason = _infer_exit_reason(details)
+                if realized_pl is not None:
+                    trade.gross_pnl = float(realized_pl)
+                    trade.net_pnl   = float(realized_pl)
+            except Exception:
+                logger.exception("Could not fetch details for OANDA trade %s — using now()", trade.oanda_order_id)
+                trade.exit_time   = datetime.now(timezone.utc)
+                trade.exit_reason = "CLOSED"
+
             updated += 1
-            logger.info("Trade %d closed (OANDA id=%s)", trade.id, trade.oanda_order_id)
+            logger.info(
+                "Trade %d closed  OANDA=%s  exit_price=%s  pnl=%s",
+                trade.id, trade.oanda_order_id, trade.exit_price, trade.net_pnl,
+            )
 
         return updated
+
+
+def _parse_oanda_time(time_str: str | None) -> datetime | None:
+    """Parse OANDA ISO timestamp (e.g. '2026-05-05T14:23:00.000000000Z') → UTC datetime."""
+    if not time_str:
+        return None
+    try:
+        from datetime import timezone as tz
+        # oandapyV20 timestamps end in nanoseconds — truncate to microseconds
+        ts = time_str[:26].rstrip("Z").rstrip(".")
+        dt = datetime.fromisoformat(ts).replace(tzinfo=tz.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _infer_exit_reason(details: dict) -> str:
+    """Map OANDA trade state/close reason to our exit_reason vocab."""
+    # closingTransactionIDs tells us which transaction(s) closed the trade.
+    # The transaction type is not directly in TradeDetails, but realizedPL sign
+    # vs stopLoss / takeProfit levels gives us a strong hint.
+    stop_loss   = details.get("stopLossOrder", {})
+    take_profit = details.get("takeProfitOrder", {})
+
+    if stop_loss.get("state") == "FILLED":
+        return "SL"
+    if take_profit.get("state") == "FILLED":
+        return "TP"
+    return "MANUAL"

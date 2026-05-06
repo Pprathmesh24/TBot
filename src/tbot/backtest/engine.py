@@ -190,11 +190,14 @@ def _write_to_db(
         session.flush()  # get run.id before committing
 
         # --- signals ---
+        # Build ts → signal_id map so trades can reference their originating signal.
+        signal_ts_map: dict[str, int] = {}
         for sig in raw_signals:
             ts = pd.Timestamp(sig["timestamp"])
             if ts.tzinfo is None:
                 ts = ts.tz_localize("UTC")
-            session.add(Signal(
+            features = sig.get("features")
+            db_sig = Signal(
                 backtest_run_id=run.id,
                 instrument="XAU_USD",
                 granularity="M5",
@@ -205,11 +208,15 @@ def _write_to_db(
                 take_profit=float(sig.get("take_profit", 0.0)),
                 source_strategy=strategy_name,
                 model_score=float(sig.get("confidence", 0.0)),
-            ))
+                features_json=json.dumps(features) if features else None,
+            )
+            session.add(db_sig)
+            session.flush()
+            signal_ts_map[ts.isoformat()] = db_sig.id
 
         # --- trades from vectorbt ---
         try:
-            _write_trades(session, run.id, portfolio)
+            _write_trades(session, run.id, portfolio, signal_ts_map)
         except Exception as exc:
             print(f"  Warning: could not write trade records: {exc}")
 
@@ -224,7 +231,7 @@ def _write_to_db(
     return run_id
 
 
-def _write_trades(session, run_id: int, portfolio) -> None:
+def _write_trades(session, run_id: int, portfolio, signal_ts_map: dict | None = None) -> None:
     try:
         trades_df = portfolio.trades.records_readable
     except Exception:
@@ -240,15 +247,30 @@ def _write_trades(session, run_id: int, portfolio) -> None:
         pnl_col  = col.get("pnl") or col.get("profit & loss")
         pnl      = float(row[pnl_col]) if pnl_col else None
 
+        # vectorbt uses "Avg Entry Price" / "Avg Exit Price" (averaged over fills)
+        entry_px = float(row.get(col.get("avg entry price"), 0.0))
+        exit_px_col = col.get("avg exit price")
+        exit_px = float(row.get(exit_px_col, 0.0)) if exit_px_col else None
+
+        # Direction column: "Long" → BUY, "Short" → SELL
+        direction = str(row.get(col.get("direction"), "Long"))
+        side = "BUY" if direction.lower() == "long" else "SELL"
+
+        # Match to originating signal by entry timestamp
+        signal_id = None
+        if signal_ts_map and entry_ts:
+            signal_id = signal_ts_map.get(entry_ts.isoformat())
+
         session.add(Trade(
             backtest_run_id=run_id,
+            signal_id=signal_id,
             instrument="XAU_USD",
-            side="BUY",
+            side=side,
             units=1.0,
             entry_time=entry_ts or datetime.now(timezone.utc),
-            entry_price=float(row.get(col.get("entry price"), 0.0)),
+            entry_price=entry_px,
             exit_time=exit_ts,
-            exit_price=float(row.get(col.get("exit price"), 0.0)) if col.get("exit price") else None,
+            exit_price=exit_px if exit_px else None,
             exit_reason=str(row.get(col.get("exit type"), "")),
             gross_pnl=pnl,
             net_pnl=pnl,

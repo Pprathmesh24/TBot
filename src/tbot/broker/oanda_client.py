@@ -21,6 +21,7 @@ class MarketClosedError(Exception):
 
 import oandapyV20
 import oandapyV20.endpoints.accounts as accounts
+import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.positions as positions
 import oandapyV20.endpoints.trades as trades_ep
@@ -192,3 +193,81 @@ class OandaClient:
         req  = trades_ep.OpenTrades(self.account_id)
         resp = self._client.request(req)
         return resp.get("trades", [])
+
+    # ------------------------------------------------------------------
+    # Historical candles (used at runner startup to backfill warmup deque)
+    # ------------------------------------------------------------------
+
+    def get_recent_candles(
+        self,
+        instrument:  str,
+        granularity: str = "M5",
+        count:       int = 100,
+    ) -> list[dict]:
+        """
+        Fetch the most recent `count` *completed* candles from OANDA.
+
+        OANDA's `instruments.candles` returns the in-progress candle as the
+        last entry with `complete=False`; we drop it. Schema matches what
+        PriceStream emits (CandleBuilder.to_dict) so the deque is wire-
+        compatible — no glue code needed in the runner.
+
+        Args:
+            instrument:  e.g. "XAU_USD"
+            granularity: OANDA code, e.g. "M5", "M15", "H1"
+            count:       number of *complete* candles desired (we request
+                         count+1 so dropping the in-progress tail still
+                         leaves us with `count`)
+
+        Returns:
+            list of dicts in chronological order (oldest → newest), each:
+            {timestamp, open, high, low, close, volume, is_green, is_red}
+        """
+        params = {
+            "granularity": granularity,
+            "count":       count + 1,   # +1 buffer for the incomplete tail
+            "price":       "M",          # mid prices (matches PriceStream)
+        }
+        req = instruments.InstrumentsCandles(instrument=instrument, params=params)
+        self._client.request(req)
+        raw = req.response.get("candles", [])
+
+        from datetime import datetime, timezone
+        out: list[dict] = []
+        for c in raw:
+            if not c.get("complete", False):
+                continue
+            mid = c["mid"]
+            o = float(mid["o"])
+            cl = float(mid["c"])
+            ts_str = c["time"]
+            # OANDA returns RFC3339 with nanosecond precision e.g.
+            # "2026-05-06T01:25:00.000000000Z" — fromisoformat needs Python
+            # to handle the trailing Z + nanoseconds. Strip ns and Z.
+            ts_clean = ts_str[:19]   # "2026-05-06T01:25:00"
+            ts = datetime.fromisoformat(ts_clean).replace(tzinfo=timezone.utc)
+            out.append({
+                "timestamp": ts,
+                "open":      o,
+                "high":      float(mid["h"]),
+                "low":       float(mid["l"]),
+                "close":     cl,
+                "volume":    int(c["volume"]),
+                "is_green":  cl >= o,
+                "is_red":    cl < o,
+            })
+        return out
+
+    def get_trade_details(self, trade_id: str) -> dict:
+        """
+        Fetch full details for a specific trade (open or closed).
+
+        For a closed trade the response includes:
+          averageClosePrice  — actual fill price at close
+          closeTime          — ISO timestamp of close
+          realizedPL         — P&L in account currency
+          state              — "CLOSED"
+        """
+        req  = trades_ep.TradeDetails(self.account_id, tradeID=trade_id)
+        resp = self._client.request(req)
+        return resp.get("trade", {})

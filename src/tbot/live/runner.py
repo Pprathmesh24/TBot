@@ -24,11 +24,14 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+import json
+
 from tbot.broker.executor import Executor
 from tbot.broker.oanda_client import MarketClosedError, OandaClient
 from tbot.broker.stream import PriceStream
 from tbot.config import cfg
 from tbot.core.agent_v2 import AITradingAgentV2
+from tbot.db.models import RLExperience, Signal as SignalModel, Trade
 from tbot.db.session import get_session, init_db
 from tbot.risk.manager import RiskManager
 from tbot.risk.state import RiskState
@@ -111,9 +114,19 @@ class LiveRunner:
             # equity fetches per signal anyway.
             logger.exception("Initial account fetch failed — continuing anyway")
 
+        # Backfill warmup window from OANDA REST so a restart doesn't lose
+        # the 8-hour warmup. Best-effort: if it fails, we fall back to the
+        # old behavior (build up from the live stream).
+        self._backfill_warmup()
+
         # Start price stream in background thread
         stream_thread = self._stream.start_background(self._on_candle)
         logger.info("Price stream started (background thread)")
+
+        # Start background sync loop (closes trades + creates RL experiences)
+        sync_thread = threading.Thread(target=self._sync_loop, daemon=True, name="sync-loop")
+        sync_thread.start()
+        logger.info("Sync loop started (5-min interval)")
 
         # Block main thread until stop() is called
         try:
@@ -157,6 +170,50 @@ class LiveRunner:
         """Signal the runner to shut down cleanly."""
         logger.info("Shutdown requested …")
         self._stop_event.set()
+
+    def _backfill_warmup(self) -> None:
+        """
+        Pre-populate the candle deque with the last `_MIN_HISTORY` completed
+        M5 candles from OANDA REST. Without this, every restart loses up to
+        8 hours of warmup and the agent sits idle until enough live candles
+        accumulate.
+
+        Best-effort: any failure (REST blip, market closed, schema change)
+        is caught and the runner continues with an empty deque. The next
+        live candle just resumes the old behavior.
+
+        Edge case: if the latest backfilled candle's bar boundary coincides
+        with the bar the live stream is currently building, the live stream
+        will eventually emit that same bar timestamp — the deque has
+        maxlen=_WINDOW_SIZE so duplicates simply shift the window by one;
+        the agent's signal de-dup is by timestamp so it won't double-fire.
+        """
+        try:
+            candles = self._client.get_recent_candles(
+                instrument  = self._instrument,
+                granularity = "M5",
+                count       = _MIN_HISTORY,
+            )
+            if not candles:
+                logger.warning("Backfill: REST returned 0 candles — starting cold")
+                return
+
+            for c in candles:
+                self._candles.append(c)
+
+            logger.info(
+                "Backfill: pre-loaded %d candles (oldest=%s, newest=%s) — "
+                "agent ready immediately, no warmup wait.",
+                len(candles),
+                candles[0]["timestamp"],
+                candles[-1]["timestamp"],
+            )
+        except Exception:
+            logger.exception(
+                "Backfill failed — falling back to live-only warmup "
+                "(will need %d live candles before agent activates)",
+                _MIN_HISTORY,
+            )
 
     # ------------------------------------------------------------------
     # Internal
@@ -230,8 +287,8 @@ class LiveRunner:
 
         try:
             with get_session() as session:
-                risk  = RiskState(session, instrument=self._instrument)
-                rm    = RiskManager()
+                risk     = RiskState(session, instrument=self._instrument)
+                rm       = RiskManager()
                 executor = Executor(self._client, session, rm=rm, instrument=self._instrument)
 
                 for sig in signals:
@@ -245,9 +302,10 @@ class LiveRunner:
                             "Executing signal  side=%s  entry=%.3f  conf=%.3f",
                             sig.get("type"), sig.get("price"), sig.get("confidence", 0),
                         )
-                        trade_id = executor.execute(sig, equity=equity)
+                        signal_id = self._write_live_signal(sig, session)
+                        trade_id  = executor.execute(sig, equity=equity, signal_id=signal_id)
                         if trade_id:
-                            logger.info("Trade DB id=%d", trade_id)
+                            logger.info("Trade DB id=%d  signal_id=%s", trade_id, signal_id)
                     except MarketClosedError:
                         logger.info("Market closed — remaining signals skipped")
                         return
@@ -255,8 +313,67 @@ class LiveRunner:
                         logger.exception("Failed to process signal %s — continuing", sig.get("timestamp"))
                         continue
         except Exception:
-            # DB session creation / commit failure — must not crash the runner.
             logger.exception("DB session error in _process_signals — signals dropped")
+
+    def _write_live_signal(self, sig: dict, session) -> int | None:
+        """Persist a live signal to DB and return its ID (for Trade.signal_id)."""
+        try:
+            ts = pd.Timestamp(sig.get("timestamp", datetime.now(timezone.utc)))
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            features = sig.get("features")
+            db_sig = SignalModel(
+                instrument      = self._instrument,
+                granularity     = "M5",
+                timestamp       = ts.to_pydatetime(),
+                side            = sig.get("type", "BUY"),
+                entry_price     = float(sig.get("price", 0.0)),
+                stop_loss       = float(sig.get("stop_loss", 0.0)),
+                take_profit     = float(sig.get("take_profit", 0.0)),
+                source_strategy = "smc_v2_live",
+                model_score     = float(sig.get("confidence", 0.0)),
+                features_json   = json.dumps(features) if features else None,
+            )
+            session.add(db_sig)
+            session.flush()
+            return db_sig.id
+        except Exception:
+            logger.exception("Could not write live signal to DB")
+            return None
+
+    def _sync_loop(self) -> None:
+        """
+        Background thread: every 5 minutes sync closed trades from OANDA
+        and create RLExperience rows for newly closed trades.
+        """
+        from sqlalchemy import exists, not_, select
+        from tbot.rl.experience_writer import create_experience
+
+        while not self._stop_event.is_set():
+            self._stop_event.wait(timeout=300)   # 5-minute interval
+            if self._stop_event.is_set():
+                break
+            try:
+                with get_session() as session:
+                    executor = Executor(self._client, session, instrument=self._instrument)
+                    updated  = executor.sync_closed_trades()
+                    if updated:
+                        logger.info("Sync: %d trade(s) closed", updated)
+
+                    # Create RL experiences for closed trades that don't have one yet
+                    stmt = (
+                        select(Trade)
+                        .where(Trade.instrument == self._instrument)
+                        .where(Trade.exit_time.is_not(None))
+                        .where(Trade.exit_price.is_not(None))
+                        .where(Trade.net_pnl.is_not(None))
+                        .where(not_(exists().where(RLExperience.trade_id == Trade.id)))
+                    )
+                    pending = session.execute(stmt).scalars().all()
+                    for trade in pending:
+                        create_experience(trade, session)
+            except Exception:
+                logger.exception("Error in sync loop — will retry in 5 minutes")
 
 
 # ---------------------------------------------------------------------------

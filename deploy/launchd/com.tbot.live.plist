@@ -7,11 +7,22 @@
     <key>Label</key>
     <string>com.tbot.live</string>
 
-    <!-- Python interpreter + entry script (absolute paths required) -->
+    <!--
+        Architecture (three layers of resilience, no overlap):
+            launchd  →  run_supervisor.py  →  watchdog  →  run_paper_live.py
+            (this)      (KeepAlive)          (stall-       (stream + agent
+                                              detect +      + executor)
+                                              auto-restart)
+
+        launchd owns ONLY the supervisor process. The supervisor owns the
+        runner subprocess. Never point launchd at run_paper_live.py directly
+        — that would duplicate restart responsibility with the supervisor
+        and could spawn two runners → duplicate OANDA orders.
+    -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/.venv/bin/python</string>
-        <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/scripts/run_paper_live.py</string>
+        <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/scripts/run_supervisor.py</string>
     </array>
 
     <!-- Working directory so relative paths (.env, data/) resolve correctly -->
@@ -26,12 +37,17 @@
     <key>RunAtLoad</key>
     <false/>
 
-    <!-- Log files — tail these to monitor the live bot -->
+    <!--
+        Log files for launchd's view of the supervisor. The supervisor and
+        runner write their own structured logs (logs/watchdog.log,
+        logs/paper_live.log) — these two only catch any uncaught output
+        from the supervisor's own startup before its handlers attach.
+    -->
     <key>StandardOutPath</key>
-    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/tbot-live.log</string>
+    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/launchd-supervisor.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/tbot-live-error.log</string>
+    <string>/Users/pprathmeshsmacbook/Documents/TBot_Project/TBot/logs/launchd-supervisor-error.log</string>
 
     <!-- Throttle restarts — wait 10s before restarting after a crash -->
     <key>ThrottleInterval</key>

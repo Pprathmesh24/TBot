@@ -113,8 +113,9 @@ class AITradingAgentV2:
 
             ml_score = score_signal(features)
 
-            sig_copy              = dict(sig)
+            sig_copy               = dict(sig)
             sig_copy["confidence"] = ml_score
+            sig_copy["features"]   = features   # persisted to signals.features_json
             scored.append(sig_copy)
 
         return scored

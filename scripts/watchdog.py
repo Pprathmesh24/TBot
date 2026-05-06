@@ -51,16 +51,31 @@ INCIDENT_DIR   = PROJECT_ROOT / "logs" / "incidents"
 RUNNER_SCRIPT  = PROJECT_ROOT / "scripts" / "run_paper_live.py"
 PYTHON         = PROJECT_ROOT / ".venv" / "bin" / "python"
 
-STALL_THRESHOLD_SEC = 360   # 6 minutes — should see a candle every 5 min
-CHECK_INTERVAL_SEC  = 30    # how often watchdog polls
+STALL_THRESHOLD_SEC      = 360   # 6 minutes — should see a candle every 5 min
+CHECK_INTERVAL_SEC       = 30    # how often watchdog polls
+MIN_CONSECUTIVE_FAILURES = 2     # debounce: require N consecutive failed checks
+                                 # (≈ N × CHECK_INTERVAL_SEC of sustained problem)
+                                 # before alerting / restarting. Prevents single
+                                 # transient blips from killing the runner.
+STARTUP_GRACE_SEC        = 600   # if runner has been up this long with zero
+                                 # candles ever logged, fail health (catches
+                                 # silent auth/streaming-init failures that
+                                 # would otherwise leave watchdog reporting OK
+                                 # forever).
 
 CANDLE_PATTERN  = re.compile(r"Candle closed: (\S+ \S+)")
 ERROR_PATTERNS  = [
-    "ChunkedEncodingError",
-    "Price stream disconnected",
+    # Watchdog only restarts on conditions stream.py CANNOT fix on its own.
+    # Network-level errors (ChunkedEncodingError, ReadTimeout, ConnectionError,
+    # "Price stream disconnected") are all handled by stream.py's exponential-
+    # backoff reconnect loop — flagging them here just causes spurious restarts
+    # that wipe runtime state. The real safety nets are:
+    #   1. Stall detection (no candle for STALL_THRESHOLD_SEC)
+    #   2. Startup-hang detection (no candle ever, past STARTUP_GRACE_SEC)
+    #   3. Process-alive check (PID dead)
+    # Only catastrophic top-level crashes that stream.py can't recover from
+    # need this layer.
     "LiveRunner crashed",
-    "ConnectionError",
-    "ReadTimeout",
 ]
 
 
@@ -82,13 +97,12 @@ def _send_slack(text: str) -> None:
         logger.warning("Slack alert failed: %s", exc)
 
 
-def _last_candle_time() -> datetime | None:
-    """Return the UTC timestamp of the most recent 'Candle closed' log line."""
-    if not LOG_FILE.exists():
+def _scan_file_for_last_candle(path: Path) -> datetime | None:
+    """Scan the tail of one log file for the most recent 'Candle closed' line."""
+    if not path.exists() or path.stat().st_size == 0:
         return None
     try:
-        # Read last 200 lines efficiently
-        with open(LOG_FILE, "rb") as f:
+        with open(path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
             chunk = min(size, 8192)
@@ -101,12 +115,32 @@ def _last_candle_time() -> datetime | None:
 
         if last_match is None:
             return None
-
-        ts_str = last_match.group(1)  # e.g. "2026-05-05 03:40:00+00:00"
-        return datetime.fromisoformat(ts_str)
+        return datetime.fromisoformat(last_match.group(1))
     except Exception as exc:
-        logger.warning("Could not parse last candle time: %s", exc)
+        logger.warning("Could not parse %s: %s", path.name, exc)
         return None
+
+
+def _last_candle_time() -> datetime | None:
+    """
+    Return the UTC timestamp of the most recent 'Candle closed' line across
+    paper_live.log and any recently rotated paper_live.log.* files.
+
+    Why scan rotated files: RotatingFileHandler rotates at 10 MB. With DEBUG
+    logging on a tick stream, rotation can happen multiple times per day. If
+    we only check the current file and rotation just happened, the new file
+    has no candle entries yet → false stall alert.
+    """
+    candidates: list[Path] = [LOG_FILE]
+    # Add rotated files in order .1, .2, ... (most recent first)
+    for rotated in sorted(LOG_FILE.parent.glob(f"{LOG_FILE.name}.*")):
+        candidates.append(rotated)
+
+    for path in candidates:
+        ts = _scan_file_for_last_candle(path)
+        if ts is not None:
+            return ts
+    return None
 
 
 def _recent_errors() -> list[str]:
@@ -225,7 +259,10 @@ class HealthStatus:
         return " | ".join(self.issues) if self.issues else "OK"
 
 
-def check_health(runner_pid: int | None) -> HealthStatus:
+def check_health(
+    runner_pid: int | None,
+    runner_start_time: datetime | None = None,
+) -> HealthStatus:
     status = HealthStatus()
     now = _now_utc()
 
@@ -236,8 +273,17 @@ def check_health(runner_pid: int | None) -> HealthStatus:
     # 2. Last candle timestamp
     last_ts = _last_candle_time()
     if last_ts is None:
-        # No candle yet — only a problem if runner has been up > 10 min
-        pass
+        # No candle ever logged. Two interpretations:
+        #   - Runner just started (within grace window) → still OK, give it time.
+        #   - Runner has been up past the grace window → silent failure
+        #     (auth wrong, instrument typo, stream init hung). Must alert.
+        if runner_start_time is not None:
+            uptime = (now - runner_start_time).total_seconds()
+            if uptime > STARTUP_GRACE_SEC:
+                status.fail(
+                    f"no candles logged after {uptime:.0f}s of uptime "
+                    f"(grace={STARTUP_GRACE_SEC}s) — possible silent stream init failure"
+                )
     else:
         gap_sec = (now - last_ts.replace(tzinfo=timezone.utc) if last_ts.tzinfo is None
                    else now - last_ts)
@@ -269,10 +315,12 @@ def run_watchdog(external_pid: int | None = None) -> None:
     owns_runner = external_pid is None
     runner_proc: subprocess.Popen | None = None
     runner_pid: int | None = external_pid
+    runner_start_time: datetime = _now_utc()  # also updated on each restart
 
     if owns_runner:
         runner_proc = _start_runner()
         runner_pid  = runner_proc.pid
+        runner_start_time = _now_utc()
         time.sleep(15)  # give runner time to start streaming
 
     logger.info(
@@ -291,7 +339,7 @@ def run_watchdog(external_pid: int | None = None) -> None:
             if owns_runner and runner_proc is not None:
                 runner_pid = runner_proc.pid
 
-            status = check_health(runner_pid)
+            status = check_health(runner_pid, runner_start_time)
 
             if status.ok:
                 consecutive_failures = 0
@@ -300,16 +348,29 @@ def run_watchdog(external_pid: int | None = None) -> None:
 
             consecutive_failures += 1
             issue_str = str(status)
-            logger.warning("Health check FAILED (%dx): %s", consecutive_failures, issue_str)
+            logger.warning(
+                "Health check FAILED (%d/%d): %s",
+                consecutive_failures, MIN_CONSECUTIVE_FAILURES, issue_str,
+            )
 
-            # Write incident report
+            # Always write an incident report so the audit trail is complete,
+            # even for blips that self-heal before the debounce threshold.
             _write_incident(
                 kind="stall" if "stall" in issue_str else "error",
                 detail=issue_str,
                 runner_pid=runner_pid,
             )
 
-            # Alert Slack
+            # Debounce: hold off on Slack + restart until we've seen the failure
+            # MIN_CONSECUTIVE_FAILURES times in a row. A single blip is ignored.
+            if consecutive_failures < MIN_CONSECUTIVE_FAILURES:
+                logger.info(
+                    "Below restart threshold (%d/%d) — waiting one more check before action.",
+                    consecutive_failures, MIN_CONSECUTIVE_FAILURES,
+                )
+                continue
+
+            # Alert Slack (only after threshold reached)
             _send_slack(
                 f":rotating_light: *TBot Watchdog Alert*\n"
                 f"Issue: {issue_str}\n"
@@ -321,6 +382,7 @@ def run_watchdog(external_pid: int | None = None) -> None:
             if owns_runner:
                 runner_proc = _restart_runner(runner_proc, issue_str)
                 runner_pid  = runner_proc.pid
+                runner_start_time = _now_utc()       # reset grace window
                 consecutive_failures = 0
                 time.sleep(15)  # wait for runner to warm up before next check
             else:

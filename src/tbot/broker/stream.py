@@ -184,10 +184,14 @@ class PriceStream:
                     elif bar_ts > self._builder.bar_start:
                         completed = self._builder.to_dict()
                         logger.debug("Candle closed: %s  C=%.3f", bar_ts, completed["close"])
-                        try:
-                            on_candle(completed)
-                        except Exception:
-                            logger.exception("on_candle callback raised")
+                        # No try/except here: LiveRunner._on_candle wraps its
+                        # own logic in try/except already, so any exception
+                        # surfacing here is a bug in the framing or in
+                        # LiveRunner's OWN exception handler — letting it
+                        # propagate triggers the outer stream-loop's reconnect
+                        # path, which logs it loudly. Double-catching would
+                        # mask genuine bugs.
+                        on_candle(completed)
                         self._builder = CandleBuilder(bar_ts, mid)
                     else:
                         self._builder.update(mid)
