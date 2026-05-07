@@ -129,13 +129,13 @@ class OandaClient:
 
         if stop_loss is not None:
             order_body["order"]["stopLossOnFill"] = {
-                "price": f"{stop_loss:.5f}",
+                "price": f"{stop_loss:.2f}",
                 "timeInForce": "GTC",
             }
 
         if take_profit is not None:
             order_body["order"]["takeProfitOnFill"] = {
-                "price": f"{take_profit:.5f}",
+                "price": f"{take_profit:.2f}",
                 "timeInForce": "GTC",
             }
 

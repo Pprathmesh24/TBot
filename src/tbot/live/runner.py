@@ -261,10 +261,16 @@ class LiveRunner:
             if latest_ts.tzinfo is None:
                 latest_ts = latest_ts.replace(tzinfo=timezone.utc)
 
+            all_signals = self._agent.current_signals
             new_signals = [
-                s for s in self._agent.current_signals
+                s for s in all_signals
                 if _ts_matches(s.get("timestamp"), latest_ts)
             ]
+
+            logger.debug(
+                "Agent: %d total signal(s) in window, %d at latest bar (%s)",
+                len(all_signals), len(new_signals), latest_ts,
+            )
 
             if not new_signals:
                 return
