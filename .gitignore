@@ -14,6 +14,8 @@ build/
 # Environment / secrets
 .env
 *.env
+*.pem
+TBot-key*
 
 # Data files (large — fetch via scripts)
 data/raw/*.parquet

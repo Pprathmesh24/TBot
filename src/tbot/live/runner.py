@@ -26,6 +26,8 @@ import pandas as pd
 
 import json
 
+from sqlalchemy import select
+
 from tbot.broker.executor import Executor
 from tbot.broker.oanda_client import MarketClosedError, OandaClient
 from tbot.broker.stream import PriceStream
@@ -299,6 +301,17 @@ class LiveRunner:
 
                 for sig in signals:
                     try:
+                        # Dedup: a live signal already exists for this bar →
+                        # another process (or a stream replay) beat us to it.
+                        # The SMC analyzer is deterministic, so duplicates here
+                        # always mean reentrancy, never two distinct edges.
+                        if self._live_signal_exists(sig, session):
+                            logger.warning(
+                                "Duplicate signal for %s @ %s — skipping (already in DB)",
+                                self._instrument, sig.get("timestamp"),
+                            )
+                            continue
+
                         ok, reason = risk.can_trade(equity=equity)
                         if not ok:
                             logger.info("Signal blocked: %s", reason)
@@ -320,6 +333,33 @@ class LiveRunner:
                         continue
         except Exception:
             logger.exception("DB session error in _process_signals — signals dropped")
+
+    def _live_signal_exists(self, sig: dict, session) -> bool:
+        """
+        True if a LIVE signal row already exists for this (instrument, bar).
+        Live rows have backtest_run_id IS NULL; we ignore backtest rows so
+        replaying a backtest into the same DB doesn't block live trading.
+        Fail-open on DB error so a transient blip never silently drops a trade.
+        """
+        try:
+            raw_ts = sig.get("timestamp")
+            if raw_ts is None:
+                return False
+            ts = pd.Timestamp(raw_ts)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            stmt = (
+                select(SignalModel.id)
+                .where(SignalModel.instrument      == self._instrument)
+                .where(SignalModel.granularity     == "M5")
+                .where(SignalModel.timestamp       == ts.to_pydatetime())
+                .where(SignalModel.backtest_run_id.is_(None))
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none() is not None
+        except Exception:
+            logger.exception("Dedup check failed — proceeding without dedup")
+            return False
 
     def _write_live_signal(self, sig: dict, session) -> int | None:
         """Persist a live signal to DB and return its ID (for Trade.signal_id)."""
