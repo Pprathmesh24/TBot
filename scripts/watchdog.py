@@ -259,6 +259,30 @@ class HealthStatus:
         return " | ".join(self.issues) if self.issues else "OK"
 
 
+def _is_market_open() -> bool:
+    """
+    Return True if XAU_USD is likely trading right now.
+
+    Gold trades Sunday 22:00 UTC → Friday 22:00 UTC.
+    During the weekend window the stream connects but emits no ticks,
+    so the watchdog must not fire stall/grace alerts then.
+    """
+    now = _now_utc()
+    weekday = now.weekday()   # 0=Mon … 6=Sun
+    hour    = now.hour
+
+    # Saturday all day → closed
+    if weekday == 5:
+        return False
+    # Sunday before 22:00 UTC → closed
+    if weekday == 6 and hour < 22:
+        return False
+    # Friday after 22:00 UTC → closed (weekend starts)
+    if weekday == 4 and hour >= 22:
+        return False
+    return True
+
+
 def check_health(
     runner_pid: int | None,
     runner_start_time: datetime | None = None,
@@ -270,26 +294,29 @@ def check_health(
     if runner_pid is not None and not _is_alive(runner_pid):
         status.fail(f"runner PID {runner_pid} is dead")
 
-    # 2. Last candle timestamp
-    last_ts = _last_candle_time()
-    if last_ts is None:
-        # No candle ever logged. Two interpretations:
-        #   - Runner just started (within grace window) → still OK, give it time.
-        #   - Runner has been up past the grace window → silent failure
-        #     (auth wrong, instrument typo, stream init hung). Must alert.
-        if runner_start_time is not None:
-            uptime = (now - runner_start_time).total_seconds()
-            if uptime > STARTUP_GRACE_SEC:
-                status.fail(
-                    f"no candles logged after {uptime:.0f}s of uptime "
-                    f"(grace={STARTUP_GRACE_SEC}s) — possible silent stream init failure"
-                )
+    # 2. Last candle timestamp — skip stall/grace checks when market is closed
+    if not _is_market_open():
+        logger.debug("Market closed (weekend) — skipping candle stall check")
     else:
-        gap_sec = (now - last_ts.replace(tzinfo=timezone.utc) if last_ts.tzinfo is None
-                   else now - last_ts)
-        gap_sec = gap_sec.total_seconds()
-        if gap_sec > STALL_THRESHOLD_SEC:
-            status.fail(f"stream stall — last candle {gap_sec:.0f}s ago (>{STALL_THRESHOLD_SEC}s)")
+        last_ts = _last_candle_time()
+        if last_ts is None:
+            # No candle ever logged. Two interpretations:
+            #   - Runner just started (within grace window) → still OK, give it time.
+            #   - Runner has been up past the grace window → silent failure
+            #     (auth wrong, instrument typo, stream init hung). Must alert.
+            if runner_start_time is not None:
+                uptime = (now - runner_start_time).total_seconds()
+                if uptime > STARTUP_GRACE_SEC:
+                    status.fail(
+                        f"no candles logged after {uptime:.0f}s of uptime "
+                        f"(grace={STARTUP_GRACE_SEC}s) — possible silent stream init failure"
+                    )
+        else:
+            gap_sec = (now - last_ts.replace(tzinfo=timezone.utc) if last_ts.tzinfo is None
+                       else now - last_ts)
+            gap_sec = gap_sec.total_seconds()
+            if gap_sec > STALL_THRESHOLD_SEC:
+                status.fail(f"stream stall — last candle {gap_sec:.0f}s ago (>{STALL_THRESHOLD_SEC}s)")
 
     # 3. Recent error lines
     errors = _recent_errors()
